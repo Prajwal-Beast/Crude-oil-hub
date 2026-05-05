@@ -1,60 +1,87 @@
 import { NextResponse } from "next/server";
 
-const AV_KEY = process.env.ALPHA_VANTAGE_API_KEY!;
-
-// Alpha Vantage symbols for commodities
-const SYMBOLS: Record<string, string> = {
-  WTI: "CRUDE_OIL_WTI",
-  BRENT: "BRENT",
-  NATURAL_GAS: "NATURAL_GAS",
+const YF_HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  Accept: "application/json",
+  "Accept-Language": "en-US,en;q=0.9",
 };
 
-async function fetchCommodity(function_name: string) {
-  const url = `https://www.alphavantage.co/query?function=${function_name}&interval=daily&apikey=${AV_KEY}`;
-  const res = await fetch(url, { next: { revalidate: 60 } });
-  const data = await res.json();
-  return data;
+// Yahoo Finance symbols
+// CL=F  = WTI Crude Oil Futures (NYMEX)
+// BZ=F  = Brent Crude Oil Futures (ICE)
+// NG=F  = Natural Gas Futures (NYMEX)
+const SYMBOLS = ["CL=F", "BZ=F", "NG=F"];
+
+async function fetchQuotes() {
+  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${SYMBOLS.join(",")}&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent,regularMarketPreviousClose,regularMarketOpen,regularMarketDayHigh,regularMarketDayLow,shortName`;
+  const res = await fetch(url, {
+    headers: YF_HEADERS,
+    next: { revalidate: 30 },
+  });
+  if (!res.ok) throw new Error(`Yahoo quote failed: ${res.status}`);
+  return res.json();
 }
 
-function extractLatest(data: Record<string, unknown>) {
-  // Alpha Vantage returns { data: [{ date, value }, ...] }
-  const series = (data["data"] as { date: string; value: string }[]) ?? [];
-  if (!series.length) return { price: null, change: null, changePct: null };
-
-  const latest = series[0];
-  const previous = series[1];
-  const price = parseFloat(latest.value);
-  const prevPrice = previous ? parseFloat(previous.value) : price;
-  const change = parseFloat((price - prevPrice).toFixed(2));
-  const changePct = parseFloat(((change / prevPrice) * 100).toFixed(2));
-
-  return { price, change, changePct, date: latest.date };
+async function fetchChart(symbol: string) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=90d`;
+  const res = await fetch(url, {
+    headers: YF_HEADERS,
+    next: { revalidate: 60 },
+  });
+  if (!res.ok) throw new Error(`Yahoo chart failed for ${symbol}: ${res.status}`);
+  return res.json();
 }
 
-function buildChartData(data: Record<string, unknown>) {
-  const series = (data["data"] as { date: string; value: string }[]) ?? [];
-  return series
-    .slice(0, 90)
-    .reverse()
-    .map((d) => ({
-      time: d.date,
-      value: parseFloat(d.value),
-    }));
+function buildChartSeries(chartData: Record<string, unknown>) {
+  try {
+    const result = (chartData as { chart: { result: { timestamp: number[]; indicators: { quote: { close: number[] }[] } }[] } }).chart?.result?.[0];
+    if (!result) return [];
+    const timestamps: number[] = result.timestamp ?? [];
+    const closes: number[] = result.indicators?.quote?.[0]?.close ?? [];
+    return timestamps
+      .map((ts, i) => ({
+        time: new Date(ts * 1000).toISOString().split("T")[0],
+        value: closes[i] != null ? parseFloat(closes[i].toFixed(2)) : null,
+      }))
+      .filter((d) => d.value != null) as { time: string; value: number }[];
+  } catch {
+    return [];
+  }
 }
 
 export async function GET() {
   try {
-    const [wtiRaw, brentRaw, ngRaw] = await Promise.all([
-      fetchCommodity(SYMBOLS.WTI),
-      fetchCommodity(SYMBOLS.BRENT),
-      fetchCommodity(SYMBOLS.NATURAL_GAS),
+    // Fetch quotes + charts in parallel
+    const [quotesData, wtiChart, brentChart] = await Promise.all([
+      fetchQuotes(),
+      fetchChart("CL=F"),
+      fetchChart("BZ=F"),
     ]);
 
-    const wti = extractLatest(wtiRaw);
-    const brent = extractLatest(brentRaw);
-    const ng = extractLatest(ngRaw);
+    const results: Record<string, unknown>[] =
+      quotesData?.quoteResponse?.result ?? [];
 
-    // Overall sentiment: bullish if majority are positive
+    const get = (sym: string) =>
+      results.find((r) => (r as { symbol: string }).symbol === sym) as Record<string, number> | undefined;
+
+    const wtiQ = get("CL=F");
+    const brentQ = get("BZ=F");
+    const ngQ = get("NG=F");
+
+    const map = (q: Record<string, number> | undefined) => ({
+      price: q?.regularMarketPrice ?? null,
+      change: q?.regularMarketChange != null ? parseFloat(q.regularMarketChange.toFixed(2)) : null,
+      changePct: q?.regularMarketChangePercent != null ? parseFloat(q.regularMarketChangePercent.toFixed(2)) : null,
+      open: q?.regularMarketOpen ?? null,
+      high: q?.regularMarketDayHigh ?? null,
+      low: q?.regularMarketDayLow ?? null,
+    });
+
+    const wti = map(wtiQ);
+    const brent = map(brentQ);
+    const ng = map(ngQ);
+
     const positiveCount = [wti, brent, ng].filter((c) => (c.changePct ?? 0) > 0).length;
     const sentiment = positiveCount >= 2 ? "BULLISH" : "BEARISH";
 
@@ -63,11 +90,11 @@ export async function GET() {
       brent,
       naturalGas: ng,
       sentiment,
-      wtiChart: buildChartData(wtiRaw),
-      brentChart: buildChartData(brentRaw),
+      wtiChart: buildChartSeries(wtiChart),
+      brentChart: buildChartSeries(brentChart),
     });
   } catch (err) {
     console.error("Market API error:", err);
-    return NextResponse.json({ error: "Failed to fetch market data" }, { status: 500 });
+    return NextResponse.json({ error: "Failed to fetch market data", detail: String(err) }, { status: 500 });
   }
 }

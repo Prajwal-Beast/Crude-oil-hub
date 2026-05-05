@@ -1,177 +1,202 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { createChart, ColorType, AreaSeries, type IChartApi, type ISeriesApi, type LineData } from "lightweight-charts";
+import { useEffect, useRef, useState, useId } from "react";
 import { useMarketData } from "@/hooks/useMarketData";
-import { BarChart2, Maximize2 } from "lucide-react";
+import { BarChart2, Maximize2, Minimize2 } from "lucide-react";
+
+declare global {
+  interface Window {
+    TradingView: {
+      widget: new (config: Record<string, unknown>) => void;
+    };
+  }
+}
 
 type Commodity = "wti" | "brent";
 
+const TV_SYMBOLS: Record<Commodity, string> = {
+  wti:   "NYMEX:CL1!",
+  brent: "TVC:UKOIL",
+};
+
+const TV_INTERVALS = [
+  { label: "1H",  value: "60" },
+  { label: "4H",  value: "240" },
+  { label: "1D",  value: "D" },
+  { label: "1W",  value: "W" },
+];
+
 export default function PriceChart() {
-  const chartContainerRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<IChartApi | null>(null);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const seriesRef = useRef<ISeriesApi<"Area"> | any>(null);
-  const { data, isLoading } = useMarketData();
+  const uid = useId().replace(/:/g, "");
+  const containerId = `tv_chart_${uid}`;
+  const scriptRef = useRef<HTMLScriptElement | null>(null);
+  const { data } = useMarketData();
   const [activeCommodity, setActiveCommodity] = useState<Commodity>("wti");
+  const [activeInterval, setActiveInterval] = useState("D");
   const [isFullscreen, setIsFullscreen] = useState(false);
 
-  // Initialize chart
+  // Build / rebuild widget whenever symbol or interval changes
   useEffect(() => {
-    if (!chartContainerRef.current) return;
+    // Remove previous widget container contents
+    const container = document.getElementById(containerId);
+    if (container) container.innerHTML = "";
 
-    const chart = createChart(chartContainerRef.current, {
-      layout: {
-        background: { type: ColorType.Solid, color: "transparent" },
-        textColor: "#9ca3af",
-      },
-      grid: {
-        vertLines: { color: "#1f2937" },
-        horzLines: { color: "#1f2937" },
-      },
-      crosshair: {
-        vertLine: { color: "#6b7280", width: 1 },
-        horzLine: { color: "#6b7280", width: 1 },
-      },
-      rightPriceScale: {
-        borderColor: "#374151",
-        textColor: "#9ca3af",
-      },
-      timeScale: {
-        borderColor: "#374151",
-        timeVisible: true,
-        rightOffset: 5,
-      },
-      width: chartContainerRef.current.clientWidth,
-      height: chartContainerRef.current.clientHeight,
-    });
+    // Remove old script if present
+    if (scriptRef.current) {
+      scriptRef.current.remove();
+      scriptRef.current = null;
+    }
 
-    const areaSeries = chart.addSeries(AreaSeries, {
-      lineColor: "#f59e0b",
-      topColor: "rgba(245,158,11,0.3)",
-      bottomColor: "rgba(245,158,11,0.02)",
-      lineWidth: 2,
-      priceFormat: { type: "price", precision: 2, minMove: 0.01 },
-    });
+    const script = document.createElement("script");
+    script.src = "https://s3.tradingview.com/tv.js";
+    script.async = true;
+    script.onload = () => {
+      if (!window.TradingView) return;
+      new window.TradingView.widget({
+        autosize: true,
+        symbol: TV_SYMBOLS[activeCommodity],
+        interval: activeInterval,
+        timezone: "Etc/UTC",
+        theme: "dark",
+        style: "1",              // Candlestick
+        locale: "en",
+        toolbar_bg: "#111827",
+        enable_publishing: false,
+        withdateranges: true,
+        hide_side_toolbar: false,
+        allow_symbol_change: true,
+        save_image: true,
+        container_id: containerId,
+        backgroundColor: "rgba(3,7,18,0.0)",
+        gridColor: "rgba(31,41,55,0.8)",
+        studies: ["RSI@tv-basicstudies", "MACD@tv-basicstudies"],
+        show_popup_button: true,
+        popup_width: "1000",
+        popup_height: "650",
+        overrides: {
+          "paneProperties.background":           "#030712",
+          "paneProperties.backgroundType":       "solid",
+          "paneProperties.vertGridProperties.color": "#1f2937",
+          "paneProperties.horzGridProperties.color": "#1f2937",
+          "symbolWatermarkProperties.transparency": 90,
+          "scalesProperties.textColor":           "#9ca3af",
+          "mainSeriesProperties.candleStyle.upColor":        "#10b981",
+          "mainSeriesProperties.candleStyle.downColor":      "#ef4444",
+          "mainSeriesProperties.candleStyle.wickUpColor":    "#10b981",
+          "mainSeriesProperties.candleStyle.wickDownColor":  "#ef4444",
+          "mainSeriesProperties.candleStyle.borderUpColor":  "#10b981",
+          "mainSeriesProperties.candleStyle.borderDownColor":"#ef4444",
+        },
+      });
+    };
 
-    chartRef.current = chart;
-    seriesRef.current = areaSeries;
-
-    // Responsive resize
-    const resizeObserver = new ResizeObserver(() => {
-      if (chartContainerRef.current && chartRef.current) {
-        chartRef.current.applyOptions({
-          width: chartContainerRef.current.clientWidth,
-          height: chartContainerRef.current.clientHeight,
-        });
-      }
-    });
-    resizeObserver.observe(chartContainerRef.current);
+    scriptRef.current = script;
+    document.head.appendChild(script);
 
     return () => {
-      resizeObserver.disconnect();
-      chart.remove();
+      if (scriptRef.current) {
+        scriptRef.current.remove();
+        scriptRef.current = null;
+      }
     };
-  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeCommodity, activeInterval]);
 
-  // Update data when commodity or data changes
-  useEffect(() => {
-    if (!seriesRef.current || !data) return;
-
-    const chartData = (activeCommodity === "wti" ? data.wtiChart : data.brentChart) as LineData[];
-
-    if (chartData?.length) {
-      seriesRef.current.setData(chartData);
-
-      // Update series color for brent
-      seriesRef.current.applyOptions({
-        lineColor: activeCommodity === "wti" ? "#f59e0b" : "#3b82f6",
-        topColor:
-          activeCommodity === "wti" ? "rgba(245,158,11,0.3)" : "rgba(59,130,246,0.3)",
-        bottomColor:
-          activeCommodity === "wti" ? "rgba(245,158,11,0.02)" : "rgba(59,130,246,0.02)",
-      });
-
-      chartRef.current?.timeScale().fitContent();
-    }
-  }, [data, activeCommodity]);
-
-  const activePrice =
-    activeCommodity === "wti" ? data?.wti : data?.brent;
+  const activePrice = activeCommodity === "wti" ? data?.wti : data?.brent;
   const isPositive = (activePrice?.changePct ?? 0) >= 0;
 
   return (
     <div
-      className={`flex flex-col bg-gray-900/60 border border-gray-700/50 rounded-xl overflow-hidden ${
-        isFullscreen ? "fixed inset-0 z-50 rounded-none" : "h-full"
+      className={`flex flex-col bg-gray-900/60 border border-gray-700/50 rounded-xl overflow-hidden transition-all duration-300 ${
+        isFullscreen ? "fixed inset-2 z-50 rounded-xl shadow-2xl shadow-black/80" : "h-full"
       }`}
     >
-      {/* Chart header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
+      {/* Header bar */}
+      <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-800 flex-shrink-0 bg-gray-900/80">
         <div className="flex items-center gap-3">
-          <BarChart2 size={16} className="text-amber-400" />
-          <span className="text-white font-semibold text-sm">Price Chart</span>
+          <BarChart2 size={15} className="text-amber-400" />
+          <span className="text-white font-semibold text-sm">Live Chart</span>
 
-          {/* Toggle buttons */}
+          {/* Commodity toggle */}
           <div className="flex bg-gray-800 rounded-lg p-0.5">
             {(["wti", "brent"] as Commodity[]).map((c) => (
               <button
                 key={c}
                 onClick={() => setActiveCommodity(c)}
-                className={`px-3 py-1 text-xs font-semibold rounded-md transition-colors ${
+                className={`px-3 py-1 text-xs font-bold rounded-md transition-all ${
                   activeCommodity === c
                     ? c === "wti"
-                      ? "bg-amber-500 text-gray-950"
-                      : "bg-blue-500 text-white"
+                      ? "bg-amber-500 text-gray-950 shadow-sm"
+                      : "bg-blue-500 text-white shadow-sm"
                     : "text-gray-400 hover:text-white"
                 }`}
               >
-                {c.toUpperCase()}
+                {c === "wti" ? "WTI" : "BRENT"}
+              </button>
+            ))}
+          </div>
+
+          {/* Interval selector */}
+          <div className="flex gap-0.5">
+            {TV_INTERVALS.map((iv) => (
+              <button
+                key={iv.value}
+                onClick={() => setActiveInterval(iv.value)}
+                className={`px-2 py-0.5 text-xs rounded transition-colors ${
+                  activeInterval === iv.value
+                    ? "bg-gray-600 text-white font-semibold"
+                    : "text-gray-500 hover:text-gray-300"
+                }`}
+              >
+                {iv.label}
               </button>
             ))}
           </div>
         </div>
 
         <div className="flex items-center gap-3">
+          {/* Live price */}
           {activePrice?.price && (
-            <div className="text-right">
-              <span className="text-white font-bold font-mono">
+            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                <span className="text-xs text-gray-500">LIVE</span>
+              </div>
+              <span className="text-white font-bold font-mono text-sm">
                 ${activePrice.price.toFixed(2)}
               </span>
               <span
-                className={`ml-2 text-xs font-semibold ${
-                  isPositive ? "text-emerald-400" : "text-red-400"
+                className={`text-xs font-semibold px-1.5 py-0.5 rounded ${
+                  isPositive
+                    ? "bg-emerald-900/50 text-emerald-400"
+                    : "bg-red-900/50 text-red-400"
                 }`}
               >
                 {isPositive ? "+" : ""}
                 {activePrice.changePct?.toFixed(2)}%
               </span>
+              {activePrice.high && activePrice.low && (
+                <span className="text-xs text-gray-500 hidden xl:inline">
+                  H: <span className="text-emerald-500">${activePrice.high.toFixed(2)}</span>{" "}
+                  L: <span className="text-red-500">${activePrice.low.toFixed(2)}</span>
+                </span>
+              )}
             </div>
           )}
+
           <button
             onClick={() => setIsFullscreen((f) => !f)}
-            className="text-gray-500 hover:text-white transition-colors"
-            title="Toggle fullscreen"
+            className="text-gray-500 hover:text-amber-400 transition-colors p-1"
+            title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
           >
-            <Maximize2 size={14} />
+            {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
           </button>
         </div>
       </div>
 
-      {/* Chart area */}
-      <div className="flex-1 relative">
-        {isLoading && (
-          <div className="absolute inset-0 flex items-center justify-center z-10">
-            <div className="w-6 h-6 border-2 border-amber-500 border-t-transparent rounded-full animate-spin" />
-          </div>
-        )}
-        <div ref={chartContainerRef} className="w-full h-full" />
-      </div>
-
-      {/* 90-day label */}
-      <div className="px-4 py-2 border-t border-gray-800 text-xs text-gray-500 flex justify-between">
-        <span>90-Day Historical</span>
-        <span>Source: Alpha Vantage</span>
+      {/* TradingView widget fills the rest */}
+      <div className="flex-1 relative overflow-hidden">
+        <div id={containerId} className="w-full h-full" style={{ minHeight: 0 }} />
       </div>
     </div>
   );

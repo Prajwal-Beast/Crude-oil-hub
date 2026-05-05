@@ -5,6 +5,9 @@ export interface CommodityTick {
   price: number | null;
   change: number | null;
   changePct: number | null;
+  open: number | null;
+  high: number | null;
+  low: number | null;
   date?: string;
 }
 
